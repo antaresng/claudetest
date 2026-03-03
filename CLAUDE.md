@@ -20,16 +20,23 @@ There are no tests, no linter, and no package manager. Verification is done by o
 
 Remote: `https://github.com/antaresng/claudetest`
 
+**Commit and push frequently** — after every meaningful unit of work (new feature, bug fix, significant edit). Never let work accumulate uncommitted. This ensures we can always revert to a known-good state.
+
 After every meaningful change:
 1. Stage specific files (never `git add .` blindly)
-2. Commit with a clear message
-3. Push to `origin master`
+2. Commit with a clean, descriptive message
+3. Push immediately to `origin master`
 
 ```bash
 git add <file>
-git commit -m "description"
+git commit -m "short imperative summary of what changed"
 git push origin master
 ```
+
+Commit message style:
+- Imperative mood: "Add bell cooldown" not "Added bell cooldown"
+- First line ≤ 72 chars, describes *what* changed
+- If needed, add a blank line then a short body explaining *why*
 
 Credentials are handled automatically via `gh auth setup-git` (no password prompts).
 
