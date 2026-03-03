@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sidewalk Cyclist</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1a1a2e;
+      color: #eee;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      min-height: 100vh;
+      padding: 20px 10px;
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      letter-spacing: 2px;
+      margin-bottom: 12px;
+      color: #a8dadc;
+      text-transform: uppercase;
+    }
+
+    #game-container {
+      position: relative;
+      width: 360px;
+      height: 600px;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    }
+
+    #game {
+      display: block;
+    }
+
+    /* HUD overlay */
+    #hud {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      padding: 8px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      pointer-events: none;
+      background: linear-gradient(to bottom, rgba(0,0,0,0.55) 0%, transparent 100%);
+      z-index: 10;
+    }
+
+    #score-display {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #a8dadc;
+      letter-spacing: 1px;
+    }
+
+    #score-val {
+      font-size: 1.3rem;
+      color: #eee;
+    }
+
+    #bell-flash {
+      font-size: 1.4rem;
+      opacity: 0;
+      transform: scale(0.8);
+      transition: opacity 0.08s ease, transform 0.08s ease;
+      color: #f0a500;
+      text-shadow: 0 0 8px #f0a500;
+    }
+
+    #bell-flash.active {
+      opacity: 1;
+      transform: scale(1.4);
+    }
+
+    #speed-display {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.75rem;
+      color: #aaa;
+    }
+
+    #speed-bar-track {
+      width: 50px;
+      height: 6px;
+      background: rgba(255,255,255,0.15);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    #speed-bar-fill {
+      height: 100%;
+      background: #f0a500;
+      border-radius: 3px;
+      transition: width 0.15s ease, background 0.15s ease;
+      width: 37.5%; /* default speed 3/8 */
+    }
+
+    #speed-val {
+      color: #eee;
+      font-weight: 700;
+      min-width: 10px;
+    }
+
+    /* Controls hint */
+    #controls-hint {
+      margin-top: 10px;
+      font-size: 0.72rem;
+      color: #555;
+      text-align: center;
+      line-height: 1.7;
+    }
+
+    #controls-hint span {
+      color: #0f3460;
+      background: #a8dadc;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-weight: 700;
+      margin: 0 2px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Sidewalk Cyclist</h1>
+
+<div id="game-container">
+  <canvas id="game" width="360" height="600"></canvas>
+
+  <div id="hud">
+    <div id="score-display">SCORE <span id="score-val">0</span></div>
+    <div id="bell-flash">🔔</div>
+    <div id="speed-display">
+      SPD
+      <div id="speed-bar-track"><div id="speed-bar-fill"></div></div>
+      <span id="speed-val">3</span>
+    </div>
+  </div>
+</div>
+
+<div id="controls-hint">
+  <span>← →</span> Move &nbsp;
+  <span>↑ ↓</span> Speed &nbsp;
+  <span>Space</span> Bell &nbsp;
+  <span>P</span> Pause
+</div>
+
+<script>
+// ─── Constants ────────────────────────────────────────────────────────────────
+const CANVAS_W   = 360;
+const CANVAS_H   = 600;
+const UNIT       = 48;
+const WALL_LEFT  = 36;
+const WALL_RIGHT = CANVAS_W - 36;       // 324
+const LANE_COUNT = 6;
+const LANE_CENTERS = Array.from({length: LANE_COUNT}, (_, i) => WALL_LEFT + UNIT * i + UNIT / 2);
+const PLAYER_R   = UNIT * 0.40;         // ~19px
+const PED_R      = UNIT * 0.38;         // ~18px
+const SPEED_MIN  = 1;
+const SPEED_MAX  = 8;
+const SPEED_INIT = 3;
+const TILE_H     = 60;
+
+// ─── Canvas & Context ─────────────────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+
+// ─── HUD elements ─────────────────────────────────────────────────────────────
+const scoreValEl   = document.getElementById('score-val');
+const speedValEl   = document.getElementById('speed-val');
+const speedFillEl  = document.getElementById('speed-bar-fill');
+const bellFlashEl  = document.getElementById('bell-flash');
+
+// ─── Palette ──────────────────────────────────────────────────────────────────
+const PED_COLORS = ['#a8dadc', '#f0a500', '#4caf50', '#9b59b6', '#3498db', '#e67e22'];
+const PED_SHAPES = [3, 4, 5, 6]; // triangle, square, pentagon, hexagon
+
+// ─── Game State ───────────────────────────────────────────────────────────────
+let gameState = 'idle'; // idle | running | paused | gameover
+
+let scoreFloat    = 0;
+let score         = 0;
+let collisionFlash = 0;
+let bellCooldown  = 0;
+let lastTimestamp = 0;
+let pedIdCounter  = 0;
+
+const player = {
+  x: CANVAS_W / 2,
+  y: CANVAS_H - 80,
+  r: PLAYER_R,
+  lane: 2,
+  targetX: CANVAS_W / 2,
+  speed: SPEED_INIT,
+};
+
+const world = {
+  scrollOffset: 0,
+  spawnTimer: 0,
+  spawnInterval: 70,
+};
+
+let pedestrians = [];
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function laneCenterX(lane) {
+  return LANE_CENTERS[Math.max(0, Math.min(LANE_COUNT - 1, lane))];
+}
+
+function drawPolygon(ctx, cx, cy, r, sides, rotation) {
+  ctx.beginPath();
+  for (let i = 0; i < sides; i++) {
+    const angle = rotation + (i / sides) * Math.PI * 2 - Math.PI / 2;
+    const px = cx + r * Math.cos(angle);
+    const py = cy + r * Math.sin(angle);
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+}
+
+function updateHUD() {
+  scoreValEl.textContent = score;
+  speedValEl.textContent = player.speed;
+  const pct = (player.speed / SPEED_MAX) * 100;
+  speedFillEl.style.width = pct + '%';
+  const r = Math.round(240 * (player.speed / SPEED_MAX));
+  const g = Math.round(165 * (1 - player.speed / SPEED_MAX) + 160 * (player.speed / SPEED_MAX));
+  speedFillEl.style.background = player.speed >= 6 ? '#e94560' : player.speed >= 4 ? '#f0a500' : '#4caf50';
+}
+
+// ─── Spawn ────────────────────────────────────────────────────────────────────
+function spawnPedestrian() {
+  const lane = Math.floor(Math.random() * LANE_COUNT);
+  const cx   = laneCenterX(lane);
+  const cy   = -PED_R - 10;
+
+  // Don't spawn on top of existing pedestrian
+  for (const p of pedestrians) {
+    if (Math.hypot(p.x - cx, p.y - cy) < PED_R * 3) return;
+  }
+
+  pedestrians.push({
+    id:                pedIdCounter++,
+    x:                 cx,
+    y:                 cy,
+    r:                 PED_R,
+    lane,
+    shape:             PED_SHAPES[Math.floor(Math.random() * PED_SHAPES.length)],
+    color:             PED_COLORS[Math.floor(Math.random() * PED_COLORS.length)],
+    vy:                0.8 + Math.random() * 0.9,
+    vx:                0,
+    rotation:          Math.random() * Math.PI * 2,
+    rotationSpeed:     (Math.random() - 0.5) * 0.04,
+    collisionCooldown: 0,
+    bellJumping:       false,
+    bellRingTimer:     0,
+  });
+}
+
+// ─── Bell ─────────────────────────────────────────────────────────────────────
+function findBellTarget() {
+  const ahead = pedestrians.filter(p => p.y < player.y - player.r);
+  if (!ahead.length) return null;
+  ahead.sort((a, b) => {
+    const aClose = Math.abs(a.x - player.x) < UNIT * 0.6;
+    const bClose = Math.abs(b.x - player.x) < UNIT * 0.6;
+    if (aClose && !bClose) return -1;
+    if (bClose && !aClose) return  1;
+    return Math.hypot(a.x - player.x, a.y - player.y) - Math.hypot(b.x - player.x, b.y - player.y);
+  });
+  return ahead[0];
+}
+
+function ringBell() {
+  const target = findBellTarget();
+  if (!target) return;
+
+  // Push sideways — away from player x; if same lane push right unless near right wall
+  let dir = target.x >= player.x ? 1 : -1;
+  if (Math.abs(target.x - player.x) < 4) {
+    dir = target.x > CANVAS_W / 2 ? 1 : -1;
+  }
+  target.vx = dir * UNIT * 0.38;
+  target.vy = -2.5; // brief upward hop
+  target.bellJumping = true;
+  target.bellRingTimer = 40;
+
+  // HUD bell flash
+  bellFlashEl.classList.add('active');
+  setTimeout(() => bellFlashEl.classList.remove('active'), 420);
+}
+
+// ─── Update ───────────────────────────────────────────────────────────────────
+function update(dt) {
+  const scale = dt / 16.667; // normalise to 60fps
+
+  // Smooth player X toward target
+  player.x += (player.targetX - player.x) * 0.18 * scale * 3;
+
+  // Scroll
+  world.scrollOffset = (world.scrollOffset + player.speed * scale) % TILE_H;
+
+  // Spawn
+  world.spawnInterval = Math.max(30, 90 - player.speed * 8);
+  world.spawnTimer += scale;
+  if (world.spawnTimer >= world.spawnInterval) {
+    world.spawnTimer = 0;
+    spawnPedestrian();
+  }
+
+  // Bell cooldown
+  if (bellCooldown > 0) bellCooldown -= scale;
+
+  // Collision flash countdown
+  if (collisionFlash > 0) collisionFlash -= scale;
+
+  // Pedestrian update
+  for (const ped of pedestrians) {
+    ped.y += ped.vy * scale;
+    ped.x += ped.vx * scale;
+    ped.rotation += ped.rotationSpeed * scale;
+
+    // Gravity / friction
+    ped.vy += 0.06 * scale;
+    ped.vx *= Math.pow(0.92, scale);
+
+    // Clamp walk speed — settle back toward normal walk
+    if (ped.vy > 1.8) ped.vy = 1.8;
+
+    // Wall bounce
+    if (ped.x - ped.r < WALL_LEFT) {
+      ped.x = WALL_LEFT + ped.r;
+      ped.vx = Math.abs(ped.vx) * 0.7;
+    }
+    if (ped.x + ped.r > WALL_RIGHT) {
+      ped.x = WALL_RIGHT - ped.r;
+      ped.vx = -Math.abs(ped.vx) * 0.7;
+    }
+
+    // Bell ring timer
+    if (ped.bellRingTimer > 0) {
+      ped.bellRingTimer -= scale;
+      if (ped.bellRingTimer <= 0) ped.bellJumping = false;
+    }
+
+    // Collision cooldown
+    if (ped.collisionCooldown > 0) {
+      ped.collisionCooldown -= scale;
+      continue;
+    }
+
+    // Player collision
+    const dx   = ped.x - player.x;
+    const dy   = ped.y - player.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < player.r + ped.r) {
+      // Push pedestrian away
+      const pushDir = dx >= 0 ? 1 : -1;
+      ped.vx = pushDir * (UNIT * 0.2 + Math.random() * UNIT * 0.08);
+      ped.vy = -Math.abs(ped.vy) * 0.6 - 1;
+
+      ped.collisionCooldown = 45;
+      collisionFlash = 18;
+
+      score -= 1;
+      scoreFloat = score; // sync float
+      updateHUD();
+
+      if (score <= -10) {
+        gameState = 'gameover';
+      }
+    }
+  }
+
+  // Remove off-screen pedestrians
+  pedestrians = pedestrians.filter(p =>
+    p.y < CANVAS_H + PED_R * 3 &&
+    p.x > -UNIT * 4 &&
+    p.x < CANVAS_W + UNIT * 4
+  );
+
+  // Score accumulation (only while running)
+  scoreFloat += 0.012 * player.speed * scale;
+  const newScore = Math.max(score, Math.floor(scoreFloat));
+  if (newScore !== score) {
+    score = newScore;
+    updateHUD();
+  }
+}
+
+// ─── Render ───────────────────────────────────────────────────────────────────
+function render() {
+  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // 1. Walls (gutters)
+  ctx.fillStyle = '#16213e';
+  ctx.fillRect(0, 0, WALL_LEFT, CANVAS_H);
+  ctx.fillRect(WALL_RIGHT, 0, CANVAS_W - WALL_RIGHT, CANVAS_H);
+
+  // Brick pattern on walls
+  ctx.fillStyle = '#0f3460';
+  const brickH = 20, brickW = 18;
+  for (let wy = 0; wy < CANVAS_H; wy += brickH) {
+    const offset = (Math.floor(wy / brickH) % 2) * (brickW / 2);
+    for (let wx = -brickW; wx < WALL_LEFT + brickW; wx += brickW) {
+      ctx.fillRect(wx + offset + 1, wy + 1, brickW - 2, brickH - 2);
+    }
+    for (let wx = WALL_RIGHT; wx < CANVAS_W + brickW; wx += brickW) {
+      ctx.fillRect(wx + offset + 1, wy + 1, brickW - 2, brickH - 2);
+    }
+  }
+
+  // Wall border lines
+  ctx.strokeStyle = '#0f3460';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(WALL_LEFT, 0);
+  ctx.lineTo(WALL_LEFT, CANVAS_H);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(WALL_RIGHT, 0);
+  ctx.lineTo(WALL_RIGHT, CANVAS_H);
+  ctx.stroke();
+
+  // 2. Sidewalk tiles (scrolling)
+  const startY = -(TILE_H - world.scrollOffset % TILE_H);
+  for (let y = startY; y < CANVAS_H + TILE_H; y += TILE_H) {
+    const idx = Math.floor((y - startY) / TILE_H);
+    ctx.fillStyle = idx % 2 === 0 ? '#cecece' : '#c2c2c2';
+    ctx.fillRect(WALL_LEFT, y, WALL_RIGHT - WALL_LEFT, TILE_H);
+  }
+
+  // Tile horizontal lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+  ctx.lineWidth = 1;
+  for (let y = startY; y < CANVAS_H + TILE_H; y += TILE_H) {
+    ctx.beginPath();
+    ctx.moveTo(WALL_LEFT, y);
+    ctx.lineTo(WALL_RIGHT, y);
+    ctx.stroke();
+  }
+
+  // 3. Lane dividers (dashed)
+  ctx.setLineDash([8, 10]);
+  ctx.strokeStyle = 'rgba(0,0,0,0.18)';
+  ctx.lineWidth = 1;
+  const dashOffset = -(world.scrollOffset % 18);
+  ctx.lineDashOffset = dashOffset;
+  for (let i = 1; i < LANE_COUNT; i++) {
+    const lx = WALL_LEFT + UNIT * i;
+    ctx.beginPath();
+    ctx.moveTo(lx, 0);
+    ctx.lineTo(lx, CANVAS_H);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.lineDashOffset = 0;
+
+  // 4. Pedestrians
+  for (const ped of pedestrians) {
+    ctx.save();
+
+    // Bell ring glow
+    if (ped.bellJumping && ped.bellRingTimer > 0) {
+      const alpha = Math.min(1, ped.bellRingTimer / 20);
+      ctx.beginPath();
+      ctx.arc(ped.x, ped.y, ped.r + 6, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(240, 165, 0, ${alpha})`;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+
+    // Shape fill
+    drawPolygon(ctx, ped.x, ped.y, ped.r, ped.shape, ped.rotation);
+    ctx.fillStyle = ped.color;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Eyes (two small dots)
+    const eyeR = ped.r * 0.12;
+    const eyeOff = ped.r * 0.3;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(ped.x - eyeOff * 0.5, ped.y - eyeOff * 0.3, eyeR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(ped.x + eyeOff * 0.5, ped.y - eyeOff * 0.3, eyeR, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // 5. Player (cyclist)
+  drawPlayer();
+
+  // 6. Collision flash
+  if (collisionFlash > 0) {
+    const alpha = (collisionFlash / 18) * 0.38;
+    ctx.fillStyle = `rgba(233, 69, 96, ${alpha})`;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  }
+
+  // 7. State overlays
+  if (gameState === 'idle') {
+    renderIdleScreen();
+  } else if (gameState === 'paused') {
+    renderPauseOverlay();
+  } else if (gameState === 'gameover') {
+    renderGameOverScreen();
+  }
+}
+
+function drawPlayer() {
+  const px = player.x;
+  const py = player.y;
+  const r  = player.r;
+
+  // Shadow
+  ctx.save();
+  ctx.globalAlpha = 0.25;
+  ctx.beginPath();
+  ctx.ellipse(px + 3, py + 4, r * 0.9, r * 0.6, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#000';
+  ctx.fill();
+  ctx.restore();
+
+  // Body circle (jersey)
+  ctx.beginPath();
+  ctx.arc(px, py, r, 0, Math.PI * 2);
+  ctx.fillStyle = '#e94560';
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  // Helmet (inner circle, offset up)
+  ctx.beginPath();
+  ctx.arc(px, py - r * 0.18, r * 0.46, 0, Math.PI * 2);
+  ctx.fillStyle = '#eee';
+  ctx.fill();
+  ctx.strokeStyle = '#ccc';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Helmet stripe
+  ctx.beginPath();
+  ctx.arc(px, py - r * 0.18, r * 0.46, -0.6, 0.6);
+  ctx.strokeStyle = '#e94560';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // Front wheel
+  ctx.beginPath();
+  ctx.ellipse(px, py + r * 0.60, r * 0.25, r * 0.14, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#222';
+  ctx.fill();
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+function renderIdleScreen() {
+  ctx.fillStyle = 'rgba(26, 26, 46, 0.82)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#a8dadc';
+  ctx.font = 'bold 2.2rem Segoe UI, sans-serif';
+  ctx.fillText('🚲', CANVAS_W / 2, CANVAS_H / 2 - 70);
+
+  ctx.fillStyle = '#eee';
+  ctx.font = 'bold 1.5rem Segoe UI, sans-serif';
+  ctx.fillText('SIDEWALK CYCLIST', CANVAS_W / 2, CANVAS_H / 2 - 30);
+
+  ctx.fillStyle = '#a8dadc';
+  ctx.font = '0.95rem Segoe UI, sans-serif';
+  ctx.fillText('Avoid pedestrians on the narrow sidewalk', CANVAS_W / 2, CANVAS_H / 2 + 8);
+  ctx.fillText('Ring your bell to clear the way!', CANVAS_W / 2, CANVAS_H / 2 + 30);
+
+  ctx.fillStyle = '#f0a500';
+  ctx.font = 'bold 1rem Segoe UI, sans-serif';
+  ctx.fillText('Press any key to start', CANVAS_W / 2, CANVAS_H / 2 + 70);
+
+  ctx.fillStyle = '#555';
+  ctx.font = '0.75rem Segoe UI, sans-serif';
+  ctx.fillText('Game over at score -10', CANVAS_W / 2, CANVAS_H / 2 + 96);
+}
+
+function renderPauseOverlay() {
+  ctx.fillStyle = 'rgba(26, 26, 46, 0.78)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#eee';
+  ctx.font = 'bold 2.2rem Segoe UI, sans-serif';
+  ctx.fillText('PAUSED', CANVAS_W / 2, CANVAS_H / 2 - 16);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '1rem Segoe UI, sans-serif';
+  ctx.fillText('Press P to resume', CANVAS_W / 2, CANVAS_H / 2 + 20);
+}
+
+function renderGameOverScreen() {
+  ctx.fillStyle = 'rgba(26, 26, 46, 0.88)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#e94560';
+  ctx.font = 'bold 2rem Segoe UI, sans-serif';
+  ctx.fillText('GAME OVER', CANVAS_W / 2, CANVAS_H / 2 - 50);
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = '1rem Segoe UI, sans-serif';
+  ctx.fillText('Final Score', CANVAS_W / 2, CANVAS_H / 2 - 14);
+
+  ctx.fillStyle = '#a8dadc';
+  ctx.font = 'bold 2.8rem Segoe UI, sans-serif';
+  ctx.fillText(score, CANVAS_W / 2, CANVAS_H / 2 + 28);
+
+  ctx.fillStyle = '#f0a500';
+  ctx.font = 'bold 1rem Segoe UI, sans-serif';
+  ctx.fillText('Press R to play again', CANVAS_W / 2, CANVAS_H / 2 + 68);
+}
+
+// ─── Game Loop ────────────────────────────────────────────────────────────────
+function gameLoop(timestamp) {
+  requestAnimationFrame(gameLoop);
+  const dt = Math.min(timestamp - lastTimestamp, 50);
+  lastTimestamp = timestamp;
+
+  if (gameState === 'running') {
+    update(dt);
+  }
+  render();
+}
+
+// ─── Reset ────────────────────────────────────────────────────────────────────
+function resetGame() {
+  player.lane    = 2;
+  player.x       = laneCenterX(2);
+  player.targetX = player.x;
+  player.speed   = SPEED_INIT;
+
+  pedestrians    = [];
+  scoreFloat     = 0;
+  score          = 0;
+  collisionFlash = 0;
+  bellCooldown   = 0;
+
+  world.scrollOffset = 0;
+  world.spawnTimer   = 0;
+
+  updateHUD();
+  gameState = 'running';
+}
+
+// ─── Input ────────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  // Prevent browser scroll from arrow keys / space
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) {
+    e.preventDefault();
+  }
+
+  if (gameState === 'idle') {
+    resetGame();
+    return;
+  }
+
+  if (gameState === 'gameover') {
+    if (e.key === 'r' || e.key === 'R') resetGame();
+    return;
+  }
+
+  if (e.key === 'p' || e.key === 'P') {
+    gameState = gameState === 'paused' ? 'running' : 'paused';
+    return;
+  }
+
+  if (gameState !== 'running') return;
+
+  if (e.key === 'ArrowLeft') {
+    player.lane = Math.max(0, player.lane - 1);
+    player.targetX = laneCenterX(player.lane);
+  }
+  if (e.key === 'ArrowRight') {
+    player.lane = Math.min(LANE_COUNT - 1, player.lane + 1);
+    player.targetX = laneCenterX(player.lane);
+  }
+  if (e.key === 'ArrowUp') {
+    player.speed = Math.min(SPEED_MAX, player.speed + 1);
+    updateHUD();
+  }
+  if (e.key === 'ArrowDown') {
+    player.speed = Math.max(SPEED_MIN, player.speed - 1);
+    updateHUD();
+  }
+  if (e.key === ' ' && bellCooldown <= 0) {
+    ringBell();
+    bellCooldown = 30;
+  }
+});
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+updateHUD();
+requestAnimationFrame(ts => {
+  lastTimestamp = ts;
+  requestAnimationFrame(gameLoop);
+});
+</script>
+</body>
+</html>
