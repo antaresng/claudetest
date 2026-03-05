@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Asteroids</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1a1a2e;
+      color: #eee;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      min-height: 100vh;
+      padding: 20px 10px;
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      letter-spacing: 2px;
+      margin-bottom: 12px;
+      color: #a8dadc;
+      text-transform: uppercase;
+    }
+
+    #game-container {
+      position: relative;
+      width: 360px;
+      height: 600px;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    }
+
+    #game {
+      display: block;
+    }
+
+    #hud {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      padding: 8px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      pointer-events: none;
+      background: linear-gradient(to bottom, rgba(0,0,0,0.55) 0%, transparent 100%);
+      z-index: 10;
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: #a8dadc;
+      letter-spacing: 1px;
+    }
+
+    #hud span {
+      color: #eee;
+    }
+
+    #controls-hint {
+      margin-top: 10px;
+      font-size: 0.72rem;
+      color: #555;
+      text-align: center;
+      line-height: 1.7;
+    }
+
+    #controls-hint span {
+      color: #0f3460;
+      background: #a8dadc;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-weight: 700;
+      margin: 0 2px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Asteroids</h1>
+
+<div id="game-container">
+  <canvas id="game" width="360" height="600"></canvas>
+
+  <div id="hud">
+    <div>SCORE <span id="score-val">0</span></div>
+    <div>LVL <span id="level-val">1</span></div>
+    <div>LIVES <span id="lives-val">▲▲▲</span></div>
+  </div>
+</div>
+
+<div id="controls-hint">
+  <span>← →</span> Rotate &nbsp;
+  <span>↑</span> Thrust &nbsp;
+  <span>Space</span> Fire &nbsp;
+  <span>P</span> Pause
+</div>
+
+<script>
+// ─── Constants ────────────────────────────────────────────────────────────────
+const CANVAS_W        = 360;
+const CANVAS_H        = 600;
+const SHIP_SIZE       = 14;
+const SHIP_WIDTH      = 9;
+const SHIP_TURN_SPD   = 0.004;  // rad/ms
+const SHIP_THRUST     = 0.12;
+const SHIP_FRICTION   = 0.985;
+const SHIP_MAX_SPD    = 7;
+const BULLET_SPEED    = 9;
+const BULLET_R        = 2;
+const BULLET_LIFE     = 55;     // frames
+const BULLET_COOLDOWN = 10;     // frames
+const AST_SIZES       = [14, 28, 50];  // radius: small=0, medium=1, large=2
+const AST_SPEEDS      = [2.2, 1.4, 0.8];
+const AST_VERTICES    = [6, 8, 10];
+const AST_SCORE       = [100, 50, 20]; // small, medium, large
+const AST_JAGGEDNESS  = 0.35;
+const AST_CHILDREN    = 2;
+const LEVEL_AST_BASE  = 3;
+const LEVEL_SPD_MULT  = 0.18;
+const LIVES_START     = 3;
+const INVINCIBLE_DUR  = 180;    // frames
+const RESPAWN_DELAY   = 90;     // frames
+const STAR_COUNT      = 60;
+
+// ─── Canvas & Context ─────────────────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+
+// ─── HUD Elements ─────────────────────────────────────────────────────────────
+const scoreValEl = document.getElementById('score-val');
+const levelValEl = document.getElementById('level-val');
+const livesValEl = document.getElementById('lives-val');
+
+// ─── Game State ───────────────────────────────────────────────────────────────
+let gameState      = 'idle'; // idle | running | paused | gameover
+let score          = 0;
+let level          = 1;
+let lives          = LIVES_START;
+let lastTimestamp  = 0;
+let bulletCooldown = 0; // counts down in frames (dt-scaled)
+
+const player = {
+  x:            CANVAS_W / 2,
+  y:            CANVAS_H / 2,
+  vx:           0,
+  vy:           0,
+  angle:        -Math.PI / 2, // pointing up; angle 0 = right in canvas math
+  thrusting:    false,
+  invincible:   0,            // countdown in frames
+  dead:         false,
+  respawnTimer: 0,            // countdown in frames
+  r:            SHIP_SIZE,
+};
+
+let bullets   = [];
+let asteroids = [];
+let stars     = [];
+const keys    = { left: false, right: false, up: false };
+
+// ─── Stars ────────────────────────────────────────────────────────────────────
+function initStars() {
+  stars = [];
+  for (let i = 0; i < STAR_COUNT; i++) {
+    stars.push({
+      x: Math.random() * CANVAS_W,
+      y: Math.random() * CANVAS_H,
+      r: Math.random() * 1.2 + 0.3,
+    });
+  }
+}
+
+// ─── Asteroid spawn ───────────────────────────────────────────────────────────
+function spawnAsteroid(sizeIdx, x, y, pvx, pvy) {
+  const r                = AST_SIZES[sizeIdx];
+  const numVerts         = AST_VERTICES[sizeIdx];
+  const levelSpeedMult   = 1 + LEVEL_SPD_MULT * (level - 1);
+  const baseSpeed        = AST_SPEEDS[sizeIdx] * levelSpeedMult;
+  const spawnAngle       = Math.random() * Math.PI * 2;
+  const speed            = baseSpeed * (0.7 + Math.random() * 0.6);
+
+  const vx = pvx + Math.cos(spawnAngle) * speed;
+  const vy = pvy + Math.sin(spawnAngle) * speed;
+
+  // Pre-compute jagged vertex offsets at spawn time
+  const verts = [];
+  for (let i = 0; i < numVerts; i++) {
+    const a   = (i / numVerts) * Math.PI * 2;
+    const jag = 1 - AST_JAGGEDNESS + Math.random() * AST_JAGGEDNESS * 2;
+    verts.push([Math.cos(a) * r * jag, Math.sin(a) * r * jag]);
+  }
+
+  asteroids.push({
+    x, y, vx, vy,
+    size:   sizeIdx,
+    r,
+    angle:  Math.random() * Math.PI * 2,
+    rotSpd: (Math.random() - 0.5) * 0.04,
+    verts,
+  });
+}
+
+function spawnWave(lvl) {
+  const count = LEVEL_AST_BASE + (lvl - 1);
+  const safeR = 100; // keep asteroids away from the center on spawn
+  for (let i = 0; i < count; i++) {
+    let x, y;
+    do {
+      x = Math.random() * CANVAS_W;
+      y = Math.random() * CANVAS_H;
+    } while (Math.hypot(x - CANVAS_W / 2, y - CANVAS_H / 2) < safeR);
+    spawnAsteroid(2, x, y, 0, 0); // size 2 = large
+  }
+}
+
+// ─── Bullets ─────────────────────────────────────────────────────────────────
+function fireBullet() {
+  if (bulletCooldown > 0 || player.dead) return;
+  bulletCooldown = BULLET_COOLDOWN;
+
+  // Bullet spawns at the ship's nose tip
+  const bx = player.x + Math.cos(player.angle) * SHIP_SIZE;
+  const by = player.y + Math.sin(player.angle) * SHIP_SIZE;
+
+  bullets.push({
+    x:    bx,
+    y:    by,
+    vx:   player.vx + Math.cos(player.angle) * BULLET_SPEED,
+    vy:   player.vy + Math.sin(player.angle) * BULLET_SPEED,
+    life: BULLET_LIFE,
+    r:    BULLET_R,
+  });
+}
+
+// ─── Torus wrap ───────────────────────────────────────────────────────────────
+function wrapPosition(obj) {
+  const pad = obj.r || 0;
+  if (obj.x < -pad)             obj.x = CANVAS_W + pad;
+  if (obj.x > CANVAS_W + pad)   obj.x = -pad;
+  if (obj.y < -pad)             obj.y = CANVAS_H + pad;
+  if (obj.y > CANVAS_H + pad)   obj.y = -pad;
+}
+
+// ─── Kill / Respawn ───────────────────────────────────────────────────────────
+function killPlayer() {
+  player.dead = true;
+  lives--;
+  updateHUD();
+  if (lives <= 0) {
+    gameState = 'gameover';
+  } else {
+    player.respawnTimer = RESPAWN_DELAY;
+  }
+}
+
+function respawnPlayer() {
+  player.x          = CANVAS_W / 2;
+  player.y          = CANVAS_H / 2;
+  player.vx         = 0;
+  player.vy         = 0;
+  player.angle      = -Math.PI / 2;
+  player.thrusting  = false;
+  player.dead       = false;
+  player.invincible = INVINCIBLE_DUR;
+}
+
+// ─── Asteroid hit ─────────────────────────────────────────────────────────────
+// Returns staged children to spawn after the iteration loop
+function hitAsteroid(idx) {
+  const ast = asteroids[idx];
+  score += AST_SCORE[ast.size];
+  updateHUD();
+
+  const children = [];
+  if (ast.size > 0) {
+    for (let i = 0; i < AST_CHILDREN; i++) {
+      children.push({ size: ast.size - 1, x: ast.x, y: ast.y, pvx: ast.vx, pvy: ast.vy });
+    }
+  }
+
+  asteroids.splice(idx, 1);
+  return children;
+}
+
+// ─── HUD ─────────────────────────────────────────────────────────────────────
+function updateHUD() {
+  scoreValEl.textContent = score;
+  levelValEl.textContent = level;
+  livesValEl.textContent = '▲'.repeat(Math.max(0, lives));
+}
+
+// ─── Reset ────────────────────────────────────────────────────────────────────
+function resetGame() {
+  score          = 0;
+  level          = 1;
+  lives          = LIVES_START;
+  bullets        = [];
+  asteroids      = [];
+  bulletCooldown = 0;
+
+  keys.left  = false;
+  keys.right = false;
+  keys.up    = false;
+
+  player.x          = CANVAS_W / 2;
+  player.y          = CANVAS_H / 2;
+  player.vx         = 0;
+  player.vy         = 0;
+  player.angle      = -Math.PI / 2;
+  player.thrusting  = false;
+  player.dead       = false;
+  player.invincible = 0;
+  player.respawnTimer = 0;
+
+  updateHUD();
+  spawnWave(level);
+  gameState = 'running';
+}
+
+// ─── Update ───────────────────────────────────────────────────────────────────
+function update(dt) {
+  const scale = dt / 16.667; // normalise to 60fps
+
+  // Bullet cooldown
+  if (bulletCooldown > 0) bulletCooldown -= scale;
+
+  // While dead, count down respawn timer only
+  if (player.dead) {
+    player.respawnTimer -= scale;
+    if (player.respawnTimer <= 0) respawnPlayer();
+    // Asteroids still move during respawn
+    for (const ast of asteroids) {
+      ast.x     += ast.vx * scale;
+      ast.y     += ast.vy * scale;
+      ast.angle += ast.rotSpd * scale;
+      wrapPosition(ast);
+    }
+    return;
+  }
+
+  // Invincibility countdown
+  if (player.invincible > 0) player.invincible -= scale;
+
+  // Rotation
+  if (keys.left)  player.angle -= SHIP_TURN_SPD * dt;
+  if (keys.right) player.angle += SHIP_TURN_SPD * dt;
+
+  // Thrust
+  player.thrusting = keys.up;
+  if (player.thrusting) {
+    player.vx += Math.cos(player.angle) * SHIP_THRUST * scale;
+    player.vy += Math.sin(player.angle) * SHIP_THRUST * scale;
+    const spd = Math.hypot(player.vx, player.vy);
+    if (spd > SHIP_MAX_SPD) {
+      player.vx = (player.vx / spd) * SHIP_MAX_SPD;
+      player.vy = (player.vy / spd) * SHIP_MAX_SPD;
+    }
+  }
+
+  // Friction
+  player.vx *= Math.pow(SHIP_FRICTION, scale);
+  player.vy *= Math.pow(SHIP_FRICTION, scale);
+
+  player.x += player.vx * scale;
+  player.y += player.vy * scale;
+  wrapPosition(player);
+
+  // Asteroids
+  for (const ast of asteroids) {
+    ast.x     += ast.vx * scale;
+    ast.y     += ast.vy * scale;
+    ast.angle += ast.rotSpd * scale;
+    wrapPosition(ast);
+  }
+
+  // Bullets
+  for (const b of bullets) {
+    b.x    += b.vx * scale;
+    b.y    += b.vy * scale;
+    b.life -= scale;
+    wrapPosition(b);
+  }
+  bullets = bullets.filter(b => b.life > 0);
+
+  // Collisions — bullets vs asteroids (iterate backwards to splice safely)
+  const toSpawn = [];
+  for (let bi = bullets.length - 1; bi >= 0; bi--) {
+    const b = bullets[bi];
+    for (let ai = asteroids.length - 1; ai >= 0; ai--) {
+      if (Math.hypot(b.x - asteroids[ai].x, b.y - asteroids[ai].y) < b.r + asteroids[ai].r) {
+        toSpawn.push(...hitAsteroid(ai));
+        bullets.splice(bi, 1);
+        break; // one bullet hits one asteroid
+      }
+    }
+  }
+  // Spawn children after loop to avoid mutation-during-iteration
+  for (const c of toSpawn) {
+    spawnAsteroid(c.size, c.x, c.y, c.pvx, c.pvy);
+  }
+
+  // Collisions — ship vs asteroids
+  if (player.invincible <= 0) {
+    const hitR = SHIP_SIZE * 0.7;
+    for (let ai = asteroids.length - 1; ai >= 0; ai--) {
+      if (Math.hypot(player.x - asteroids[ai].x, player.y - asteroids[ai].y) < hitR + asteroids[ai].r) {
+        killPlayer();
+        break;
+      }
+    }
+  }
+
+  // Level up — all asteroids cleared
+  if (asteroids.length === 0 && !player.dead) {
+    level++;
+    updateHUD();
+    spawnWave(level);
+  }
+}
+
+// ─── Render ───────────────────────────────────────────────────────────────────
+function render() {
+  // Background
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Stars
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  for (const s of stars) {
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Asteroids — stroke-only teal jagged polygons
+  ctx.strokeStyle = '#a8dadc';
+  ctx.lineWidth = 1.5;
+  for (const ast of asteroids) {
+    ctx.save();
+    ctx.translate(ast.x, ast.y);
+    ctx.rotate(ast.angle);
+    ctx.beginPath();
+    for (let i = 0; i < ast.verts.length; i++) {
+      const [vx, vy] = ast.verts[i];
+      i === 0 ? ctx.moveTo(vx, vy) : ctx.lineTo(vx, vy);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Bullets — small filled white circles
+  ctx.fillStyle = '#eee';
+  for (const b of bullets) {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Ship
+  renderShip();
+
+  // State overlays
+  if (gameState === 'idle') {
+    renderIdleScreen();
+  } else if (gameState === 'paused') {
+    renderPauseOverlay();
+  } else if (gameState === 'gameover') {
+    renderGameOverScreen();
+  }
+}
+
+function renderShip() {
+  if (player.dead) return;
+
+  // Blink during invincibility: visible every other 5-frame window
+  if (player.invincible > 0 && Math.floor(player.invincible / 5) % 2 !== 0) return;
+
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  // angle 0 = right; +PI/2 makes the nose (0, -SHIP_SIZE) point in the angle direction
+  ctx.rotate(player.angle + Math.PI / 2);
+
+  // Amber thrust flame
+  if (player.thrusting) {
+    const flicker = 0.6 + Math.random() * 0.4;
+    ctx.strokeStyle = '#f0a500';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-SHIP_WIDTH * 0.5,  SHIP_SIZE * 0.6);
+    ctx.lineTo(0,                   SHIP_SIZE * 0.6 + SHIP_SIZE * 0.7 * flicker);
+    ctx.lineTo( SHIP_WIDTH * 0.5,  SHIP_SIZE * 0.6);
+    ctx.stroke();
+  }
+
+  // White ship triangle (nose at top in local space)
+  ctx.strokeStyle = '#eee';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0,             -SHIP_SIZE);        // nose
+  ctx.lineTo(-SHIP_WIDTH,   SHIP_SIZE * 0.6);   // left wing
+  ctx.lineTo(0,              SHIP_SIZE * 0.3);   // tail indent
+  ctx.lineTo( SHIP_WIDTH,   SHIP_SIZE * 0.6);   // right wing
+  ctx.closePath();
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function renderIdleScreen() {
+  ctx.fillStyle = 'rgba(26, 26, 46, 0.82)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#a8dadc';
+  ctx.font = 'bold 2.8rem Segoe UI, sans-serif';
+  ctx.fillText('ASTEROIDS', CANVAS_W / 2, CANVAS_H / 2 - 60);
+
+  ctx.fillStyle = '#eee';
+  ctx.font = '0.95rem Segoe UI, sans-serif';
+  ctx.fillText('Destroy all asteroids to advance levels', CANVAS_W / 2, CANVAS_H / 2 - 14);
+  ctx.fillText('Large \u2192 Medium \u2192 Small \u2192 Gone', CANVAS_W / 2, CANVAS_H / 2 + 12);
+
+  ctx.fillStyle = '#f0a500';
+  ctx.font = 'bold 1rem Segoe UI, sans-serif';
+  ctx.fillText('Press any key to start', CANVAS_W / 2, CANVAS_H / 2 + 56);
+
+  ctx.fillStyle = '#555';
+  ctx.font = '0.75rem Segoe UI, sans-serif';
+  ctx.fillText('\u2190 \u2192 Rotate  \u2191 Thrust  Space Fire  P Pause', CANVAS_W / 2, CANVAS_H / 2 + 84);
+}
+
+function renderPauseOverlay() {
+  ctx.fillStyle = 'rgba(26, 26, 46, 0.78)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#eee';
+  ctx.font = 'bold 2.2rem Segoe UI, sans-serif';
+  ctx.fillText('PAUSED', CANVAS_W / 2, CANVAS_H / 2 - 16);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '1rem Segoe UI, sans-serif';
+  ctx.fillText('Press P to resume', CANVAS_W / 2, CANVAS_H / 2 + 20);
+}
+
+function renderGameOverScreen() {
+  ctx.fillStyle = 'rgba(26, 26, 46, 0.88)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#e94560';
+  ctx.font = 'bold 2rem Segoe UI, sans-serif';
+  ctx.fillText('GAME OVER', CANVAS_W / 2, CANVAS_H / 2 - 70);
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = '1rem Segoe UI, sans-serif';
+  ctx.fillText('Final Score', CANVAS_W / 2, CANVAS_H / 2 - 30);
+
+  ctx.fillStyle = '#a8dadc';
+  ctx.font = 'bold 2.8rem Segoe UI, sans-serif';
+  ctx.fillText(score, CANVAS_W / 2, CANVAS_H / 2 + 16);
+
+  ctx.fillStyle = '#f0a500';
+  ctx.font = '1rem Segoe UI, sans-serif';
+  ctx.fillText('Level Reached: ' + level, CANVAS_W / 2, CANVAS_H / 2 + 50);
+
+  ctx.fillStyle = '#f0a500';
+  ctx.font = 'bold 1rem Segoe UI, sans-serif';
+  ctx.fillText('Press R to play again', CANVAS_W / 2, CANVAS_H / 2 + 84);
+}
+
+// ─── Game Loop ────────────────────────────────────────────────────────────────
+function gameLoop(timestamp) {
+  requestAnimationFrame(gameLoop);
+  const dt = Math.min(timestamp - lastTimestamp, 50);
+  lastTimestamp = timestamp;
+  if (gameState === 'running') update(dt);
+  render();
+}
+
+// ─── Input ────────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', ' '].includes(e.key)) {
+    e.preventDefault();
+  }
+
+  if (gameState === 'idle') {
+    resetGame();
+    return;
+  }
+
+  if (gameState === 'gameover') {
+    if (e.key === 'r' || e.key === 'R') resetGame();
+    return;
+  }
+
+  if (e.key === 'p' || e.key === 'P') {
+    gameState = gameState === 'paused' ? 'running' : 'paused';
+    return;
+  }
+
+  if (gameState !== 'running') return;
+
+  if (e.key === 'ArrowLeft')  keys.left  = true;
+  if (e.key === 'ArrowRight') keys.right = true;
+  if (e.key === 'ArrowUp')    keys.up    = true;
+  if (e.key === ' ')          fireBullet();
+});
+
+document.addEventListener('keyup', e => {
+  if (e.key === 'ArrowLeft')  keys.left  = false;
+  if (e.key === 'ArrowRight') keys.right = false;
+  if (e.key === 'ArrowUp')    keys.up    = false;
+});
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+initStars();
+updateHUD();
+requestAnimationFrame(ts => {
+  lastTimestamp = ts;
+  requestAnimationFrame(gameLoop);
+});
+</script>
+</body>
+</html>
