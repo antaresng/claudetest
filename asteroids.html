@@ -58,9 +58,9 @@
   <canvas id="game"></canvas>
 
   <div id="hud">
-    <div>SCORE <span id="score-val">0</span></div>
+    <div>P1 <span id="p1-score">0</span> &nbsp; <span id="p1-lives">▲▲▲</span></div>
     <div>LVL <span id="level-val">1</span></div>
-    <div>LIVES <span id="lives-val">▲▲▲</span></div>
+    <div><span id="p2-lives">▲▲▲</span> &nbsp; <span id="p2-score">0</span> P2</div>
   </div>
 </div>
 
@@ -96,35 +96,43 @@ const canvas = document.getElementById('game');
 const ctx    = canvas.getContext('2d');
 
 // ─── HUD Elements ─────────────────────────────────────────────────────────────
-const scoreValEl = document.getElementById('score-val');
+const p1ScoreEl = document.getElementById('p1-score');
+const p1LivesEl = document.getElementById('p1-lives');
 const levelValEl = document.getElementById('level-val');
-const livesValEl = document.getElementById('lives-val');
+const p2LivesEl = document.getElementById('p2-lives');
+const p2ScoreEl = document.getElementById('p2-score');
 
 // ─── Game State ───────────────────────────────────────────────────────────────
-let gameState      = 'idle'; // idle | running | paused | gameover
-let score          = 0;
-let level          = 1;
-let lives          = LIVES_START;
-let lastTimestamp  = 0;
-let bulletCooldown = 0; // counts down in frames (dt-scaled)
+let gameState     = 'idle'; // idle | running | paused | gameover
+let level         = 1;
+let lastTimestamp = 0;
 
-const player = {
-  x:            CANVAS_W / 2,
-  y:            CANVAS_H / 2,
-  vx:           0,
-  vy:           0,
-  angle:        -Math.PI / 2, // pointing up; angle 0 = right in canvas math
-  thrusting:    false,
-  invincible:   0,            // countdown in frames
-  dead:         false,
-  respawnTimer: 0,            // countdown in frames
-  r:            SHIP_SIZE,
-};
+function makePlayer(startX) {
+  return {
+    x:            startX,
+    y:            CANVAS_H / 2,
+    vx:           0,
+    vy:           0,
+    angle:        -Math.PI / 2,
+    thrusting:    false,
+    invincible:   0,
+    dead:         false,
+    respawnTimer: 0,
+    r:            SHIP_SIZE,
+    score:        0,
+    lives:        LIVES_START,
+    bulletCooldown: 0,
+  };
+}
+
+let p1 = makePlayer(CANVAS_W / 3);
+let p2 = makePlayer(2 * CANVAS_W / 3);
 
 let bullets   = [];
 let asteroids = [];
 let stars     = [];
-const keys    = { left: false, right: false, up: false };
+const keys1   = { left: false, right: false, up: false };
+const keys2   = { left: false, right: false, up: false };
 
 // ─── Resize ───────────────────────────────────────────────────────────────────
 function resizeCanvas() {
@@ -180,33 +188,37 @@ function spawnAsteroid(sizeIdx, x, y, pvx, pvy) {
 
 function spawnWave(lvl) {
   const count = LEVEL_AST_BASE + (lvl - 1);
-  const safeR = 100; // keep asteroids away from the center on spawn
+  const safeR = 100;
   for (let i = 0; i < count; i++) {
     let x, y;
     do {
       x = Math.random() * CANVAS_W;
       y = Math.random() * CANVAS_H;
-    } while (Math.hypot(x - CANVAS_W / 2, y - CANVAS_H / 2) < safeR);
-    spawnAsteroid(2, x, y, 0, 0); // size 2 = large
+    } while (
+      Math.hypot(x - CANVAS_W / 3,     y - CANVAS_H / 2) < safeR ||
+      Math.hypot(x - 2 * CANVAS_W / 3, y - CANVAS_H / 2) < safeR
+    );
+    spawnAsteroid(2, x, y, 0, 0);
   }
 }
 
 // ─── Bullets ─────────────────────────────────────────────────────────────────
-function fireBullet() {
-  if (bulletCooldown > 0 || player.dead) return;
-  bulletCooldown = BULLET_COOLDOWN;
+function fireBullet(p, color) {
+  if (p.bulletCooldown > 0 || p.dead || p.lives <= 0) return;
+  p.bulletCooldown = BULLET_COOLDOWN;
 
-  // Bullet spawns at the ship's nose tip
-  const bx = player.x + Math.cos(player.angle) * SHIP_SIZE;
-  const by = player.y + Math.sin(player.angle) * SHIP_SIZE;
+  const bx = p.x + Math.cos(p.angle) * SHIP_SIZE;
+  const by = p.y + Math.sin(p.angle) * SHIP_SIZE;
 
   bullets.push({
-    x:    bx,
-    y:    by,
-    vx:   player.vx + Math.cos(player.angle) * BULLET_SPEED,
-    vy:   player.vy + Math.sin(player.angle) * BULLET_SPEED,
-    life: BULLET_LIFE,
-    r:    BULLET_R,
+    x:     bx,
+    y:     by,
+    vx:    p.vx + Math.cos(p.angle) * BULLET_SPEED,
+    vy:    p.vy + Math.sin(p.angle) * BULLET_SPEED,
+    life:  BULLET_LIFE,
+    r:     BULLET_R,
+    owner: p,
+    color,
   });
 }
 
@@ -220,33 +232,34 @@ function wrapPosition(obj) {
 }
 
 // ─── Kill / Respawn ───────────────────────────────────────────────────────────
-function killPlayer() {
-  player.dead = true;
-  lives--;
+function killPlayer(p) {
+  p.dead = true;
+  p.lives--;
   updateHUD();
-  if (lives <= 0) {
+  if (p1.lives <= 0 && p2.lives <= 0) {
     gameState = 'gameover';
-  } else {
-    player.respawnTimer = RESPAWN_DELAY;
+  } else if (p.lives > 0) {
+    p.respawnTimer = RESPAWN_DELAY;
   }
+  // If p.lives <= 0, ship is permanently gone (no respawn)
 }
 
-function respawnPlayer() {
-  player.x          = CANVAS_W / 2;
-  player.y          = CANVAS_H / 2;
-  player.vx         = 0;
-  player.vy         = 0;
-  player.angle      = -Math.PI / 2;
-  player.thrusting  = false;
-  player.dead       = false;
-  player.invincible = INVINCIBLE_DUR;
+function respawnPlayer(p, startX) {
+  p.x          = startX;
+  p.y          = CANVAS_H / 2;
+  p.vx         = 0;
+  p.vy         = 0;
+  p.angle      = -Math.PI / 2;
+  p.thrusting  = false;
+  p.dead       = false;
+  p.invincible = INVINCIBLE_DUR;
 }
 
 // ─── Asteroid hit ─────────────────────────────────────────────────────────────
 // Returns staged children to spawn after the iteration loop
-function hitAsteroid(idx) {
+function hitAsteroid(idx, owner) {
   const ast = asteroids[idx];
-  score += AST_SCORE[ast.size];
+  owner.score += AST_SCORE[ast.size];
   updateHUD();
 
   const children = [];
@@ -262,33 +275,24 @@ function hitAsteroid(idx) {
 
 // ─── HUD ─────────────────────────────────────────────────────────────────────
 function updateHUD() {
-  scoreValEl.textContent = score;
+  p1ScoreEl.textContent = p1.score;
+  p1LivesEl.textContent = '▲'.repeat(Math.max(0, p1.lives));
   levelValEl.textContent = level;
-  livesValEl.textContent = '▲'.repeat(Math.max(0, lives));
+  p2LivesEl.textContent = '▲'.repeat(Math.max(0, p2.lives));
+  p2ScoreEl.textContent = p2.score;
 }
 
 // ─── Reset ────────────────────────────────────────────────────────────────────
 function resetGame() {
-  score          = 0;
-  level          = 1;
-  lives          = LIVES_START;
-  bullets        = [];
-  asteroids      = [];
-  bulletCooldown = 0;
+  level     = 1;
+  bullets   = [];
+  asteroids = [];
 
-  keys.left  = false;
-  keys.right = false;
-  keys.up    = false;
+  keys1.left = false; keys1.right = false; keys1.up = false;
+  keys2.left = false; keys2.right = false; keys2.up = false;
 
-  player.x          = CANVAS_W / 2;
-  player.y          = CANVAS_H / 2;
-  player.vx         = 0;
-  player.vy         = 0;
-  player.angle      = -Math.PI / 2;
-  player.thrusting  = false;
-  player.dead       = false;
-  player.invincible = 0;
-  player.respawnTimer = 0;
+  p1 = makePlayer(CANVAS_W / 3);
+  p2 = makePlayer(2 * CANVAS_W / 3);
 
   updateHUD();
   spawnWave(level);
@@ -296,52 +300,45 @@ function resetGame() {
 }
 
 // ─── Update ───────────────────────────────────────────────────────────────────
-function update(dt) {
-  const scale = dt / 16.667; // normalise to 60fps
+function updatePlayer(p, keys, startX, scale, dt) {
+  if (p.lives <= 0) return; // permanently gone
 
-  // Bullet cooldown
-  if (bulletCooldown > 0) bulletCooldown -= scale;
+  if (p.bulletCooldown > 0) p.bulletCooldown -= scale;
 
-  // While dead, count down respawn timer only
-  if (player.dead) {
-    player.respawnTimer -= scale;
-    if (player.respawnTimer <= 0) respawnPlayer();
-    // Asteroids still move during respawn
-    for (const ast of asteroids) {
-      ast.x     += ast.vx * scale;
-      ast.y     += ast.vy * scale;
-      ast.angle += ast.rotSpd * scale;
-      wrapPosition(ast);
-    }
+  if (p.dead) {
+    p.respawnTimer -= scale;
+    if (p.respawnTimer <= 0) respawnPlayer(p, startX);
     return;
   }
 
-  // Invincibility countdown
-  if (player.invincible > 0) player.invincible -= scale;
+  if (p.invincible > 0) p.invincible -= scale;
 
-  // Rotation
-  if (keys.left)  player.angle -= SHIP_TURN_SPD * dt;
-  if (keys.right) player.angle += SHIP_TURN_SPD * dt;
+  if (keys.left)  p.angle -= SHIP_TURN_SPD * dt;
+  if (keys.right) p.angle += SHIP_TURN_SPD * dt;
 
-  // Thrust
-  player.thrusting = keys.up;
-  if (player.thrusting) {
-    player.vx += Math.cos(player.angle) * SHIP_THRUST * scale;
-    player.vy += Math.sin(player.angle) * SHIP_THRUST * scale;
-    const spd = Math.hypot(player.vx, player.vy);
+  p.thrusting = keys.up;
+  if (p.thrusting) {
+    p.vx += Math.cos(p.angle) * SHIP_THRUST * scale;
+    p.vy += Math.sin(p.angle) * SHIP_THRUST * scale;
+    const spd = Math.hypot(p.vx, p.vy);
     if (spd > SHIP_MAX_SPD) {
-      player.vx = (player.vx / spd) * SHIP_MAX_SPD;
-      player.vy = (player.vy / spd) * SHIP_MAX_SPD;
+      p.vx = (p.vx / spd) * SHIP_MAX_SPD;
+      p.vy = (p.vy / spd) * SHIP_MAX_SPD;
     }
   }
 
-  // Friction
-  player.vx *= Math.pow(SHIP_FRICTION, scale);
-  player.vy *= Math.pow(SHIP_FRICTION, scale);
+  p.vx *= Math.pow(SHIP_FRICTION, scale);
+  p.vy *= Math.pow(SHIP_FRICTION, scale);
+  p.x  += p.vx * scale;
+  p.y  += p.vy * scale;
+  wrapPosition(p);
+}
 
-  player.x += player.vx * scale;
-  player.y += player.vy * scale;
-  wrapPosition(player);
+function update(dt) {
+  const scale = dt / 16.667;
+
+  updatePlayer(p1, keys1, CANVAS_W / 3, scale, dt);
+  updatePlayer(p2, keys2, 2 * CANVAS_W / 3, scale, dt);
 
   // Asteroids
   for (const ast of asteroids) {
@@ -360,36 +357,37 @@ function update(dt) {
   }
   bullets = bullets.filter(b => b.life > 0);
 
-  // Collisions — bullets vs asteroids (iterate backwards to splice safely)
+  // Collisions — bullets vs asteroids
   const toSpawn = [];
   for (let bi = bullets.length - 1; bi >= 0; bi--) {
     const b = bullets[bi];
     for (let ai = asteroids.length - 1; ai >= 0; ai--) {
       if (Math.hypot(b.x - asteroids[ai].x, b.y - asteroids[ai].y) < b.r + asteroids[ai].r) {
-        toSpawn.push(...hitAsteroid(ai));
+        toSpawn.push(...hitAsteroid(ai, b.owner));
         bullets.splice(bi, 1);
-        break; // one bullet hits one asteroid
+        break;
       }
     }
   }
-  // Spawn children after loop to avoid mutation-during-iteration
   for (const c of toSpawn) {
     spawnAsteroid(c.size, c.x, c.y, c.pvx, c.pvy);
   }
 
-  // Collisions — ship vs asteroids
-  if (player.invincible <= 0) {
-    const hitR = SHIP_SIZE * 0.7;
+  // Collisions — ship vs asteroids (no friendly fire)
+  const hitR = SHIP_SIZE * 0.7;
+  for (const p of [p1, p2]) {
+    if (p.dead || p.lives <= 0 || p.invincible > 0) continue;
     for (let ai = asteroids.length - 1; ai >= 0; ai--) {
-      if (Math.hypot(player.x - asteroids[ai].x, player.y - asteroids[ai].y) < hitR + asteroids[ai].r) {
-        killPlayer();
+      if (Math.hypot(p.x - asteroids[ai].x, p.y - asteroids[ai].y) < hitR + asteroids[ai].r) {
+        killPlayer(p);
         break;
       }
     }
   }
 
-  // Level up — all asteroids cleared
-  if (asteroids.length === 0 && !player.dead) {
+  // Level up — all asteroids cleared and at least one player still in game
+  const anyAlive = p1.lives > 0 || p2.lives > 0;
+  if (asteroids.length === 0 && anyAlive) {
     level++;
     updateHUD();
     spawnWave(level);
@@ -427,16 +425,17 @@ function render() {
     ctx.restore();
   }
 
-  // Bullets — small filled white circles
-  ctx.fillStyle = '#eee';
+  // Bullets — colored by owner
   for (const b of bullets) {
+    ctx.fillStyle = b.color;
     ctx.beginPath();
     ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Ship
-  renderShip();
+  // Ships
+  renderShip(p1, '#eee');
+  renderShip(p2, '#e94560');
 
   // State overlays
   if (gameState === 'idle') {
@@ -448,19 +447,18 @@ function render() {
   }
 }
 
-function renderShip() {
-  if (player.dead) return;
+function renderShip(p, shipColor) {
+  if (p.dead || p.lives <= 0) return;
 
-  // Blink during invincibility: visible every other 5-frame window
-  if (player.invincible > 0 && Math.floor(player.invincible / 5) % 2 !== 0) return;
+  // Blink during invincibility
+  if (p.invincible > 0 && Math.floor(p.invincible / 5) % 2 !== 0) return;
 
   ctx.save();
-  ctx.translate(player.x, player.y);
-  // angle 0 = right; +PI/2 makes the nose (0, -SHIP_SIZE) point in the angle direction
-  ctx.rotate(player.angle + Math.PI / 2);
+  ctx.translate(p.x, p.y);
+  ctx.rotate(p.angle + Math.PI / 2);
 
   // Amber thrust flame
-  if (player.thrusting) {
+  if (p.thrusting) {
     const flicker = 0.6 + Math.random() * 0.4;
     ctx.strokeStyle = '#f0a500';
     ctx.lineWidth = 2;
@@ -471,14 +469,14 @@ function renderShip() {
     ctx.stroke();
   }
 
-  // White ship triangle (nose at top in local space)
-  ctx.strokeStyle = '#eee';
+  // Ship triangle
+  ctx.strokeStyle = shipColor;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(0,             -SHIP_SIZE);        // nose
-  ctx.lineTo(-SHIP_WIDTH,   SHIP_SIZE * 0.6);   // left wing
-  ctx.lineTo(0,              SHIP_SIZE * 0.3);   // tail indent
-  ctx.lineTo( SHIP_WIDTH,   SHIP_SIZE * 0.6);   // right wing
+  ctx.moveTo(0,             -SHIP_SIZE);
+  ctx.lineTo(-SHIP_WIDTH,   SHIP_SIZE * 0.6);
+  ctx.lineTo(0,              SHIP_SIZE * 0.3);
+  ctx.lineTo( SHIP_WIDTH,   SHIP_SIZE * 0.6);
   ctx.closePath();
   ctx.stroke();
 
@@ -504,9 +502,14 @@ function renderIdleScreen() {
   ctx.font = 'bold 1rem Segoe UI, sans-serif';
   ctx.fillText('Press any key to start', CANVAS_W / 2, CANVAS_H / 2 + 56);
 
-  ctx.fillStyle = '#555';
+  ctx.fillStyle = '#eee';
   ctx.font = '0.75rem Segoe UI, sans-serif';
-  ctx.fillText('\u2190 \u2192 Rotate  \u2191 Thrust  Space Fire  P Pause', CANVAS_W / 2, CANVAS_H / 2 + 84);
+  ctx.fillText('P1: \u2190 \u2192 Rotate  \u2191 Thrust  Space Fire', CANVAS_W / 2, CANVAS_H / 2 + 80);
+  ctx.fillStyle = '#e94560';
+  ctx.fillText('P2: A D Rotate  W Thrust  Shift Fire', CANVAS_W / 2, CANVAS_H / 2 + 102);
+  ctx.fillStyle = '#555';
+  ctx.font = '0.7rem Segoe UI, sans-serif';
+  ctx.fillText('P Pause', CANVAS_W / 2, CANVAS_H / 2 + 124);
 }
 
 function renderPauseOverlay() {
@@ -532,23 +535,39 @@ function renderGameOverScreen() {
 
   ctx.fillStyle = '#e94560';
   ctx.font = 'bold 2rem Segoe UI, sans-serif';
-  ctx.fillText('GAME OVER', CANVAS_W / 2, CANVAS_H / 2 - 70);
+  ctx.fillText('GAME OVER', CANVAS_W / 2, CANVAS_H / 2 - 90);
 
   ctx.fillStyle = '#aaa';
-  ctx.font = '1rem Segoe UI, sans-serif';
-  ctx.fillText('Final Score', CANVAS_W / 2, CANVAS_H / 2 - 30);
+  ctx.font = '0.9rem Segoe UI, sans-serif';
+  ctx.fillText('Level Reached: ' + level, CANVAS_W / 2, CANVAS_H / 2 - 52);
 
-  ctx.fillStyle = '#a8dadc';
-  ctx.font = 'bold 2.8rem Segoe UI, sans-serif';
-  ctx.fillText(score, CANVAS_W / 2, CANVAS_H / 2 + 16);
-
-  ctx.fillStyle = '#f0a500';
-  ctx.font = '1rem Segoe UI, sans-serif';
-  ctx.fillText('Level Reached: ' + level, CANVAS_W / 2, CANVAS_H / 2 + 50);
-
-  ctx.fillStyle = '#f0a500';
+  // P1 score
+  ctx.fillStyle = '#eee';
   ctx.font = 'bold 1rem Segoe UI, sans-serif';
-  ctx.fillText('Press R to play again', CANVAS_W / 2, CANVAS_H / 2 + 84);
+  ctx.fillText('P1', CANVAS_W / 2, CANVAS_H / 2 - 18);
+  ctx.font = 'bold 2rem Segoe UI, sans-serif';
+  ctx.fillText(p1.score, CANVAS_W / 2, CANVAS_H / 2 + 16);
+
+  // P2 score
+  ctx.fillStyle = '#e94560';
+  ctx.font = 'bold 1rem Segoe UI, sans-serif';
+  ctx.fillText('P2', CANVAS_W / 2, CANVAS_H / 2 + 48);
+  ctx.font = 'bold 2rem Segoe UI, sans-serif';
+  ctx.fillText(p2.score, CANVAS_W / 2, CANVAS_H / 2 + 82);
+
+  // Winner
+  const totalP1 = p1.score, totalP2 = p2.score;
+  let winnerText;
+  if (totalP1 > totalP2)       winnerText = 'P1 Wins!';
+  else if (totalP2 > totalP1)  winnerText = 'P2 Wins!';
+  else                         winnerText = 'Tie!';
+
+  ctx.fillStyle = '#f0a500';
+  ctx.font = 'bold 1.2rem Segoe UI, sans-serif';
+  ctx.fillText(winnerText, CANVAS_W / 2, CANVAS_H / 2 + 118);
+
+  ctx.font = 'bold 1rem Segoe UI, sans-serif';
+  ctx.fillText('Press R to play again', CANVAS_W / 2, CANVAS_H / 2 + 150);
 }
 
 // ─── Game Loop ────────────────────────────────────────────────────────────────
@@ -562,9 +581,8 @@ function gameLoop(timestamp) {
 
 // ─── Input ────────────────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
-  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', ' '].includes(e.key)) {
-    e.preventDefault();
-  }
+  const preventCodes = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'Space', 'KeyW', 'ShiftLeft', 'ShiftRight'];
+  if (preventCodes.includes(e.code)) e.preventDefault();
 
   if (gameState === 'idle') {
     resetGame();
@@ -572,27 +590,38 @@ document.addEventListener('keydown', e => {
   }
 
   if (gameState === 'gameover') {
-    if (e.key === 'r' || e.key === 'R') resetGame();
+    if (e.code === 'KeyR') resetGame();
     return;
   }
 
-  if (e.key === 'p' || e.key === 'P') {
+  if (e.code === 'KeyP') {
     gameState = gameState === 'paused' ? 'running' : 'paused';
     return;
   }
 
   if (gameState !== 'running') return;
 
-  if (e.key === 'ArrowLeft')  keys.left  = true;
-  if (e.key === 'ArrowRight') keys.right = true;
-  if (e.key === 'ArrowUp')    keys.up    = true;
-  if (e.key === ' ')          fireBullet();
+  // P1 — arrow keys + Space
+  if (e.code === 'ArrowLeft')  keys1.left  = true;
+  if (e.code === 'ArrowRight') keys1.right = true;
+  if (e.code === 'ArrowUp')    keys1.up    = true;
+  if (e.code === 'Space')      fireBullet(p1, '#eee');
+
+  // P2 — WASD + Shift
+  if (e.code === 'KeyA') keys2.left  = true;
+  if (e.code === 'KeyD') keys2.right = true;
+  if (e.code === 'KeyW') keys2.up    = true;
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') fireBullet(p2, '#e94560');
 });
 
 document.addEventListener('keyup', e => {
-  if (e.key === 'ArrowLeft')  keys.left  = false;
-  if (e.key === 'ArrowRight') keys.right = false;
-  if (e.key === 'ArrowUp')    keys.up    = false;
+  if (e.code === 'ArrowLeft')  keys1.left  = false;
+  if (e.code === 'ArrowRight') keys1.right = false;
+  if (e.code === 'ArrowUp')    keys1.up    = false;
+
+  if (e.code === 'KeyA') keys2.left  = false;
+  if (e.code === 'KeyD') keys2.right = false;
+  if (e.code === 'KeyW') keys2.up    = false;
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
