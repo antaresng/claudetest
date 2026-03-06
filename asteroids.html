@@ -12,28 +12,18 @@
       color: #eee;
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
       display: flex;
-      flex-direction: column;
       align-items: center;
-      justify-content: flex-start;
-      min-height: 100vh;
-      padding: 20px 10px;
-    }
-
-    h1 {
-      font-size: 1.8rem;
-      letter-spacing: 2px;
-      margin-bottom: 12px;
-      color: #a8dadc;
-      text-transform: uppercase;
+      justify-content: center;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
     }
 
     #game-container {
       position: relative;
-      width: 360px;
-      height: 600px;
-      border-radius: 8px;
+      width: 100vw;
+      height: 100vh;
       overflow: hidden;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.6);
     }
 
     #game {
@@ -60,30 +50,12 @@
       color: #eee;
     }
 
-    #controls-hint {
-      margin-top: 10px;
-      font-size: 0.72rem;
-      color: #555;
-      text-align: center;
-      line-height: 1.7;
-    }
-
-    #controls-hint span {
-      color: #0f3460;
-      background: #a8dadc;
-      border-radius: 3px;
-      padding: 1px 5px;
-      font-weight: 700;
-      margin: 0 2px;
-    }
   </style>
 </head>
 <body>
 
-<h1>Asteroids</h1>
-
 <div id="game-container">
-  <canvas id="game" width="360" height="600"></canvas>
+  <canvas id="game"></canvas>
 
   <div id="hud">
     <div>SCORE <span id="score-val">0</span></div>
@@ -92,17 +64,10 @@
   </div>
 </div>
 
-<div id="controls-hint">
-  <span>← →</span> Rotate &nbsp;
-  <span>↑</span> Thrust &nbsp;
-  <span>Space</span> Fire &nbsp;
-  <span>P</span> Pause
-</div>
-
 <script>
 // ─── Constants ────────────────────────────────────────────────────────────────
-const CANVAS_W        = 360;
-const CANVAS_H        = 600;
+let CANVAS_W          = window.innerWidth;
+let CANVAS_H          = window.innerHeight;
 const SHIP_SIZE       = 14;
 const SHIP_WIDTH      = 9;
 const SHIP_TURN_SPD   = 0.004;  // rad/ms
@@ -160,6 +125,16 @@ let bullets   = [];
 let asteroids = [];
 let stars     = [];
 const keys    = { left: false, right: false, up: false };
+
+// ─── Resize ───────────────────────────────────────────────────────────────────
+function resizeCanvas() {
+  CANVAS_W = window.innerWidth;
+  CANVAS_H = window.innerHeight;
+  canvas.width  = CANVAS_W;
+  canvas.height = CANVAS_H;
+  initStars();
+}
+window.addEventListener('resize', resizeCanvas);
 
 // ─── Stars ────────────────────────────────────────────────────────────────────
 function initStars() {
@@ -621,7 +596,7 @@ document.addEventListener('keyup', e => {
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-initStars();
+resizeCanvas();
 updateHUD();
 requestAnimationFrame(ts => {
   lastTimestamp = ts;
